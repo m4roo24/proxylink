@@ -16,26 +16,19 @@ app.use((req, res, next) => {
 });
 
 /**
- * Universal Proxy Route supporting ?url=... and optional &parent=...
+ * Universal Proxy Route: Clean, Fast, and Direct .ts/.m3u8 Streaming
  */
 app.get('/proxy', async (req, res) => {
   const targetUrl = req.query.url;
-  const parentParam = req.query.parent; // Capture parent parameter if provided
-
   if (!targetUrl) {
     return res.status(400).send('Missing target URL parameter (?url=...)');
   }
 
   try {
     const parsedUrl = new URL(targetUrl);
+    const targetOrigin = `${parsedUrl.protocol}//${parsedUrl.host}`;
     
-    // Determine target origin based on 'parent' parameter or fallback to target URL host
-    let targetOrigin = `${parsedUrl.protocol}//${parsedUrl.host}`;
-    if (parentParam) {
-      targetOrigin = parentParam.startsWith('http') ? parentParam : `http://${parentParam}`;
-    }
-
-    // Spoof Referer and Origin using the parent parameter to bypass server blocks
+    // Upstream headers to bypass anti-hotlinking protection
     const upstreamHeaders = {
       'User-Agent': req.headers['user-agent'] || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       'Referer': targetOrigin + '/',
@@ -70,19 +63,13 @@ app.get('/proxy', async (req, res) => {
           absoluteSegmentUrl = new URL(trimmed, baseUrl).toString();
         }
 
-        // Build proxied segment link and preserve the 'parent' parameter if it exists
-        let proxiedSegmentLink = `${protocol}://${currentHost}/proxy?url=${encodeURIComponent(absoluteSegmentUrl)}`;
-        if (parentParam) {
-          proxiedSegmentLink += `&parent=${encodeURIComponent(parentParam)}`;
-        }
-
-        return proxiedSegmentLink;
+        return `${protocol}://${currentHost}/proxy?url=${encodeURIComponent(absoluteSegmentUrl)}`;
       });
 
       res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
       return res.send(rewrittenLines.join('\n'));
     } else {
-      // Stream binary data (.ts segments, etc.) directly with the parent headers
+      // Direct stream handling for .ts segments (No extra HEAD requests to prevent 500 errors)
       const response = await axios({
         method: 'get',
         url: targetUrl,
@@ -92,7 +79,7 @@ app.get('/proxy', async (req, res) => {
       });
 
       res.writeHead(response.status, {
-        'Content-Type': response.headers['content-type'] || 'video/mp2t',
+        'Content-Type': 'video/mp2t',
         'Cache-Control': 'no-cache, no-store, must-revalidate',
         'Pragma': 'no-cache',
         'Expires': '0'
@@ -147,7 +134,7 @@ app.get('/xtream', async (req, res) => {
 });
 
 app.get('/', (req, res) => {
-  res.send('IPTV Proxy Server with Parent Header Support is operational');
+  res.send('IPTV Proxy Server is operational');
 });
 
 module.exports = app;
