@@ -16,49 +16,79 @@ app.use((req, res, next) => {
 });
 
 /**
- * Universal Proxy Route with Proper Referer/Origin Spoofing for .ts and .m3u8
+ * Universal Proxy Route supporting ?url=... and optional &parent=...
  */
 app.get('/proxy', async (req, res) => {
   const targetUrl = req.query.url;
+  const parentParam = req.query.parent; // Capture parent parameter if provided
+
   if (!targetUrl) {
     return res.status(400).send('Missing target URL parameter (?url=...)');
   }
 
   try {
     const parsedUrl = new URL(targetUrl);
-    const targetOrigin = `${parsedUrl.protocol}//${parsedUrl.host}`;
     
-    // Custom headers to bypass anti-hotlinking on upstream servers
+    // Determine target origin based on 'parent' parameter or fallback to target URL host
+    let targetOrigin = `${parsedUrl.protocol}//${parsedUrl.host}`;
+    if (parentParam) {
+      targetOrigin = parentParam.startsWith('http') ? parentParam : `http://${parentParam}`;
+    }
+
+    // Spoof Referer and Origin using the parent parameter to bypass server blocks
     const upstreamHeaders = {
       'User-Agent': req.headers['user-agent'] || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       'Referer': targetOrigin + '/',
       'Origin': targetOrigin
     };
 
-    const isExplicitM3U8 = targetUrl.includes('.m3u8') || req.query.type === 'm3u8';
+    const isM3U8 = targetUrl.includes('.m3u8') || req.query.type === 'm3u8';
 
-    if (isExplicitM3U8) {
-      return await handleM3U8(targetUrl, parsedUrl, upstreamHeaders, req, res);
-    }
+    if (isM3U8) {
+      // Fetch and rewrite M3U8 playlists
+      const response = await axios.get(targetUrl, {
+        responseType: 'text',
+        headers: upstreamHeaders,
+        timeout: 10000
+      });
 
-    // Check content type for extensionless token streams
-    const headResponse = await axios.head(targetUrl, {
-      headers: upstreamHeaders,
-      validateStatus: () => true
-    });
+      const playlist = response.data;
+      const baseUrl = `${parsedUrl.protocol}//${parsedUrl.host}${parsedUrl.pathname.substring(0, parsedUrl.pathname.lastIndexOf('/') + 1)}`;
 
-    const contentType = headResponse.headers['content-type'] || '';
-    const isPlaylistContent = contentType.includes('mpegurl') || contentType.includes('application/vnd.apple.mpegurl');
+      const lines = playlist.split('\n');
+      const currentHost = req.headers.host;
+      const protocol = req.headers['x-forwarded-proto'] || 'https';
 
-    if (isPlaylistContent) {
-      return await handleM3U8(targetUrl, parsedUrl, upstreamHeaders, req, res);
+      const rewrittenLines = lines.map(line => {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) {
+          return line;
+        }
+
+        let absoluteSegmentUrl = trimmed;
+        if (!trimmed.startsWith('http://') && !trimmed.startsWith('https://')) {
+          absoluteSegmentUrl = new URL(trimmed, baseUrl).toString();
+        }
+
+        // Build proxied segment link and preserve the 'parent' parameter if it exists
+        let proxiedSegmentLink = `${protocol}://${currentHost}/proxy?url=${encodeURIComponent(absoluteSegmentUrl)}`;
+        if (parentParam) {
+          proxiedSegmentLink += `&parent=${encodeURIComponent(parentParam)}`;
+        }
+
+        return proxiedSegmentLink;
+      });
+
+      res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+      return res.send(rewrittenLines.join('\n'));
     } else {
-      // Stream binary data (.ts segments, etc.) with correct upstream headers
+      // Stream binary data (.ts segments, etc.) directly with the parent headers
       const response = await axios({
         method: 'get',
         url: targetUrl,
         responseType: 'stream',
-        headers: upstreamHeaders
+        headers: upstreamHeaders,
+        timeout: 30000
       });
 
       res.writeHead(response.status, {
@@ -73,41 +103,10 @@ app.get('/proxy', async (req, res) => {
   } catch (error) {
     console.error('Proxy Error:', error.message);
     if (!res.headersSent) {
-      res.status(500).send('Failed to fetch or stream target URL');
+      res.status(500).send(`Proxy Error: ${error.message}`);
     }
   }
 });
-
-async function handleM3U8(targetUrl, parsedUrl, upstreamHeaders, req, res) {
-  const response = await axios.get(targetUrl, {
-    responseType: 'text',
-    headers: upstreamHeaders
-  });
-
-  const playlist = response.data;
-  const baseUrl = `${parsedUrl.protocol}//${parsedUrl.host}${parsedUrl.pathname.substring(0, parsedUrl.pathname.lastIndexOf('/') + 1)}`;
-
-  const lines = playlist.split('\n');
-  const currentHost = req.headers.host;
-  const protocol = req.headers['x-forwarded-proto'] || 'https';
-
-  const rewrittenLines = lines.map(line => {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) {
-      return line;
-    }
-
-    let absoluteSegmentUrl = trimmed;
-    if (!trimmed.startsWith('http://') && !trimmed.startsWith('https://')) {
-      absoluteSegmentUrl = new URL(trimmed, baseUrl).toString();
-    }
-
-    return `${protocol}://${currentHost}/proxy?url=${encodeURIComponent(absoluteSegmentUrl)}`;
-  });
-
-  res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-  return res.send(rewrittenLines.join('\n'));
-}
 
 /**
  * Xtream Codes API & Stream Handler
@@ -116,7 +115,7 @@ app.get('/xtream', async (req, res) => {
   const { host, username, password, action, stream_id, type } = req.query;
   
   if (!host || !username || !password) {
-    return res.status(400).send('Missing Xtream parameters (host, username, password required)');
+    return res.status(400).send('Missing Xtream parameters');
   }
 
   const cleanHost = host.endsWith('/') ? host.slice(0, -1) : host;
@@ -148,7 +147,7 @@ app.get('/xtream', async (req, res) => {
 });
 
 app.get('/', (req, res) => {
-  res.send('IPTV Proxy Server is operational on proxy.kurdsport.online');
+  res.send('IPTV Proxy Server with Parent Header Support is operational');
 });
 
 module.exports = app;
