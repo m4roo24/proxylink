@@ -15,7 +15,7 @@ app.use((req, res, next) => {
 });
 
 /**
- * Universal Proxy Route using Native Fetch (Optimized for Vercel .ts & .m3u8)
+ * Universal Proxy Route using Native Fetch (.m3u8 & .ts segments)
  */
 app.get('/proxy', async (req, res) => {
   const targetUrl = req.query.url;
@@ -67,7 +67,7 @@ app.get('/proxy', async (req, res) => {
       res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
       return res.send(rewrittenLines.join('\n'));
     } else {
-      // Fetch .ts segments using native fetch arrayBuffer to prevent 502 serverless errors
+      // Fetch .ts segments using native fetch arrayBuffer to prevent 502/syntax errors
       const response = await fetch(targetUrl, { headers: upstreamHeaders });
       
       if (!response.ok) {
@@ -106,4 +106,33 @@ app.get('/xtream', async (req, res) => {
   const currentHost = req.headers.host;
   const protocol = req.headers['x-forwarded-proto'] || 'https';
 
-  if (action === 'live' && stream_id
+  if (action === 'live' && stream_id) {
+    const streamUrl = `${cleanHost}/live/${username}/${password}/${stream_id}.ts`;
+    return res.redirect(`${protocol}://${currentHost}/proxy?url=${encodeURIComponent(streamUrl)}`);
+  } 
+  
+  if ((action === 'movie' || action === 'series') && stream_id) {
+    const ext = req.query.ext || 'mp4';
+    const streamUrl = `${cleanHost}/${action}/${username}/${password}/${stream_id}.${ext}`;
+    return res.redirect(`${protocol}://${currentHost}/proxy?url=${encodeURIComponent(streamUrl)}`);
+  } 
+
+  try {
+    let apiUrl = `${cleanHost}/player_api.php?username=${username}&password=${password}`;
+    if (action) apiUrl += `&action=${action}`;
+    if (type) apiUrl += `&type=${type}`;
+
+    const apiResponse = await fetch(apiUrl);
+    const data = await apiResponse.json();
+    res.json(data);
+  } catch (error) {
+    console.error('Xtream API Error:', error.message);
+    res.status(500).send('Failed to communicate with Xtream server');
+  }
+});
+
+app.get('/', (req, res) => {
+  res.send('IPTV Proxy Server is operational');
+});
+
+module.exports = app;
