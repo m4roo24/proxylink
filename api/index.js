@@ -16,7 +16,7 @@ app.use((req, res, next) => {
 });
 
 /**
- * Universal Proxy Route: Clean, Fast, and Direct .ts/.m3u8 Streaming
+ * Universal Proxy Route optimized for Vercel (.m3u8 & .ts segments)
  */
 app.get('/proxy', async (req, res) => {
   const targetUrl = req.query.url;
@@ -69,13 +69,13 @@ app.get('/proxy', async (req, res) => {
       res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
       return res.send(rewrittenLines.join('\n'));
     } else {
-      // Direct stream handling for .ts segments (No extra HEAD requests to prevent 500 errors)
+      // Fetch .ts segments as ArrayBuffer to prevent Vercel serverless streaming crashes
       const response = await axios({
         method: 'get',
         url: targetUrl,
-        responseType: 'stream',
+        responseType: 'arraybuffer',
         headers: upstreamHeaders,
-        timeout: 30000
+        timeout: 15000
       });
 
       res.writeHead(response.status, {
@@ -85,7 +85,7 @@ app.get('/proxy', async (req, res) => {
         'Expires': '0'
       });
 
-      response.data.pipe(res);
+      return res.send(Buffer.from(response.data));
     }
   } catch (error) {
     console.error('Proxy Error:', error.message);
@@ -134,7 +134,7 @@ app.get('/xtream', async (req, res) => {
 });
 
 app.get('/', (req, res) => {
-  res.send('IPTV Proxy Server is operational');
+  res.send('IPTV Proxy Server is operational on Vercel');
 });
 
 module.exports = app;
