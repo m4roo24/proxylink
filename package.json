@@ -1,10 +1,12 @@
 {
-  "name": "hls-proxy-vercel",
+  "name": "hls-proxy",
   "version": "1.0.0",
   "scripts": {
-    "start": "node api/proxy.js"
+    "start": "node index.js"
   },
   "dependencies": {
-    "axios": "^1.6.2"
+    "axios": "^1.6.2",
+    "cors": "^2.8.5",
+    "express": "^4.18.2"
   }
 }
