@@ -16,7 +16,7 @@ app.use((req, res, next) => {
 });
 
 /**
- * 1. General HTTP/HTTPS, .m3u8 Playlists, and .ts Segment Proxy Route
+ * Universal Proxy Route: Handles .m3u8, .ts, HTTP/HTTPS, and tokenized/extensionless streams
  */
 app.get('/proxy', async (req, res) => {
   const targetUrl = req.query.url;
@@ -26,45 +26,25 @@ app.get('/proxy', async (req, res) => {
 
   try {
     const parsedUrl = new URL(targetUrl);
-    const isM3U8 = targetUrl.includes('.m3u8') || req.query.type === 'm3u8';
-    const isTS = targetUrl.includes('.ts') || req.query.type === 'ts';
+    const isExplicitM3U8 = targetUrl.includes('.m3u8') || req.query.type === 'm3u8';
 
-    if (isM3U8) {
-      // Fetch the M3U8 playlist as text
-      const response = await axios.get(targetUrl, {
-        responseType: 'text',
-        headers: { 
-          'User-Agent': req.headers['user-agent'] || 'VLC/3.0.16 LibVLC/3.0.16' 
-        }
-      });
+    if (isExplicitM3U8) {
+      return await handleM3U8(targetUrl, parsedUrl, req, res);
+    }
 
-      const playlist = response.data;
-      const baseUrl = `${parsedUrl.protocol}//${parsedUrl.host}${parsedUrl.pathname.substring(0, parsedUrl.pathname.lastIndexOf('/') + 1)}`;
+    // Inspect headers for extensionless or custom token links (e.g., /live/play/.../id)
+    const headResponse = await axios.head(targetUrl, {
+      headers: { 'User-Agent': req.headers['user-agent'] || 'VLC/3.0.16 LibVLC/3.0.16' },
+      validateStatus: () => true
+    });
 
-      // Rewrite playlist lines to route every segment (.ts, .m4s) back through this proxy
-      const lines = playlist.split('\n');
-      const rewrittenLines = lines.map(line => {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith('#')) {
-          return line; // Keep comments and tags intact
-        }
+    const contentType = headResponse.headers['content-type'] || '';
+    const isPlaylistContent = contentType.includes('mpegurl') || contentType.includes('application/vnd.apple.mpegurl');
 
-        // Convert relative segment links to absolute URLs
-        let absoluteSegmentUrl = trimmed;
-        if (!trimmed.startsWith('http://') && !trimmed.startsWith('https://')) {
-          absoluteSegmentUrl = new URL(trimmed, baseUrl).toString();
-        }
-
-        // Redirect segment back to this proxy using dynamic host detection
-        const currentHost = req.headers.host;
-        const protocol = req.headers['x-forwarded-proto'] || 'https';
-        return `${protocol}://${currentHost}/proxy?url=${encodeURIComponent(absoluteSegmentUrl)}`;
-      });
-
-      res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-      return res.send(rewrittenLines.join('\n'));
+    if (isPlaylistContent) {
+      return await handleM3U8(targetUrl, parsedUrl, req, res);
     } else {
-      // Direct stream handling for .ts segments, mp4, or direct media files
+      // Stream binary data (.ts segments, video files, etc.) directly using streams
       const response = await axios({
         method: 'get',
         url: targetUrl,
@@ -74,17 +54,13 @@ app.get('/proxy', async (req, res) => {
         }
       });
 
-      // Set proper video headers for .ts segments
-      const contentType = isTS ? 'video/mp2t' : (response.headers['content-type'] || 'video/mp2t');
-
       res.writeHead(response.status, {
-        'Content-Type': contentType,
+        'Content-Type': response.headers['content-type'] || 'video/mp2t',
         'Cache-Control': 'no-cache, no-store, must-revalidate',
         'Pragma': 'no-cache',
         'Expires': '0'
       });
 
-      // Stream binary chunks directly without loading into server memory
       response.data.pipe(res);
     }
   } catch (error) {
@@ -96,7 +72,44 @@ app.get('/proxy', async (req, res) => {
 });
 
 /**
- * 2. Xtream Codes API & Stream Handler
+ * Helper function to fetch, parse, and rewrite M3U8 playlists and their segment links
+ */
+async function handleM3U8(targetUrl, parsedUrl, req, res) {
+  const response = await axios.get(targetUrl, {
+    responseType: 'text',
+    headers: { 
+      'User-Agent': req.headers['user-agent'] || 'VLC/3.0.16 LibVLC/3.0.16' 
+    }
+  });
+
+  const playlist = response.data;
+  const baseUrl = `${parsedUrl.protocol}//${parsedUrl.host}${parsedUrl.pathname.substring(0, parsedUrl.pathname.lastIndexOf('/') + 1)}`;
+
+  const lines = playlist.split('\n');
+  const currentHost = req.headers.host;
+  const protocol = req.headers['x-forwarded-proto'] || 'https';
+
+  const rewrittenLines = lines.map(line => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) {
+      return line; // Keep comments and tags intact
+    }
+
+    let absoluteSegmentUrl = trimmed;
+    if (!trimmed.startsWith('http://') && !trimmed.startsWith('https://')) {
+      absoluteSegmentUrl = new URL(trimmed, baseUrl).toString();
+    }
+
+    // Route every segment (.ts or other chunks) back through the proxy
+    return `${protocol}://${currentHost}/proxy?url=${encodeURIComponent(absoluteSegmentUrl)}`;
+  });
+
+  res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+  return res.send(rewrittenLines.join('\n'));
+}
+
+/**
+ * Xtream Codes API & Stream Handler
  */
 app.get('/xtream', async (req, res) => {
   const { host, username, password, action, stream_id, type } = req.query;
@@ -109,20 +122,17 @@ app.get('/xtream', async (req, res) => {
   const currentHost = req.headers.host;
   const protocol = req.headers['x-forwarded-proto'] || 'https';
 
-  // Redirect live stream request (.ts) through our proxy
   if (action === 'live' && stream_id) {
     const streamUrl = `${cleanHost}/live/${username}/${password}/${stream_id}.ts`;
     return res.redirect(`${protocol}://${currentHost}/proxy?url=${encodeURIComponent(streamUrl)}`);
   } 
   
-  // Redirect VOD movies or series through our proxy
   if ((action === 'movie' || action === 'series') && stream_id) {
     const ext = req.query.ext || 'mp4';
     const streamUrl = `${cleanHost}/${action}/${username}/${password}/${stream_id}.${ext}`;
     return res.redirect(`${protocol}://${currentHost}/proxy?url=${encodeURIComponent(streamUrl)}`);
   } 
 
-  // Proxy Xtream JSON metadata API (categories, stream list, user info)
   try {
     let apiUrl = `${cleanHost}/player_api.php?username=${username}&password=${password}`;
     if (action) apiUrl += `&action=${action}`;
@@ -136,7 +146,7 @@ app.get('/xtream', async (req, res) => {
   }
 });
 
-// Default root response
+// Root check endpoint
 app.get('/', (req, res) => {
   res.send('IPTV Proxy Server is operational on proxy.kurdsport.online');
 });
