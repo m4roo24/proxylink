@@ -1,5 +1,4 @@
 const express = require('express');
-const axios = require('axios');
 const { URL } = require('url');
 
 const app = express();
@@ -16,7 +15,7 @@ app.use((req, res, next) => {
 });
 
 /**
- * Universal Proxy Route optimized for Vercel (.m3u8 & .ts segments)
+ * Universal Proxy Route using Native Fetch (Optimized for Vercel .ts & .m3u8)
  */
 app.get('/proxy', async (req, res) => {
   const targetUrl = req.query.url;
@@ -39,13 +38,12 @@ app.get('/proxy', async (req, res) => {
 
     if (isM3U8) {
       // Fetch and rewrite M3U8 playlists
-      const response = await axios.get(targetUrl, {
-        responseType: 'text',
-        headers: upstreamHeaders,
-        timeout: 10000
-      });
+      const response = await fetch(targetUrl, { headers: upstreamHeaders });
+      if (!response.ok) {
+        return res.status(response.status).send('Failed to fetch upstream M3U8 playlist');
+      }
 
-      const playlist = response.data;
+      const playlist = await response.text();
       const baseUrl = `${parsedUrl.protocol}//${parsedUrl.host}${parsedUrl.pathname.substring(0, parsedUrl.pathname.lastIndexOf('/') + 1)}`;
 
       const lines = playlist.split('\n');
@@ -69,23 +67,22 @@ app.get('/proxy', async (req, res) => {
       res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
       return res.send(rewrittenLines.join('\n'));
     } else {
-      // Fetch .ts segments as ArrayBuffer to prevent Vercel serverless streaming crashes
-      const response = await axios({
-        method: 'get',
-        url: targetUrl,
-        responseType: 'arraybuffer',
-        headers: upstreamHeaders,
-        timeout: 15000
-      });
+      // Fetch .ts segments using native fetch arrayBuffer to prevent 502 serverless errors
+      const response = await fetch(targetUrl, { headers: upstreamHeaders });
+      
+      if (!response.ok) {
+        return res.status(response.status).send(`Upstream segment error: ${response.status}`);
+      }
 
-      res.writeHead(response.status, {
-        'Content-Type': 'video/mp2t',
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Pragma': 'no-cache',
-        'Expires': '0'
-      });
+      const arrayBuffer = await response.arrayBuffer();
+      const buffer = Buffer.from(arrayBuffer);
 
-      return res.send(Buffer.from(response.data));
+      res.setHeader('Content-Type', 'video/mp2t');
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+
+      return res.send(buffer);
     }
   } catch (error) {
     console.error('Proxy Error:', error.message);
@@ -109,32 +106,4 @@ app.get('/xtream', async (req, res) => {
   const currentHost = req.headers.host;
   const protocol = req.headers['x-forwarded-proto'] || 'https';
 
-  if (action === 'live' && stream_id) {
-    const streamUrl = `${cleanHost}/live/${username}/${password}/${stream_id}.ts`;
-    return res.redirect(`${protocol}://${currentHost}/proxy?url=${encodeURIComponent(streamUrl)}`);
-  } 
-  
-  if ((action === 'movie' || action === 'series') && stream_id) {
-    const ext = req.query.ext || 'mp4';
-    const streamUrl = `${cleanHost}/${action}/${username}/${password}/${stream_id}.${ext}`;
-    return res.redirect(`${protocol}://${currentHost}/proxy?url=${encodeURIComponent(streamUrl)}`);
-  } 
-
-  try {
-    let apiUrl = `${cleanHost}/player_api.php?username=${username}&password=${password}`;
-    if (action) apiUrl += `&action=${action}`;
-    if (type) apiUrl += `&type=${type}`;
-
-    const apiResponse = await axios.get(apiUrl);
-    res.json(apiResponse.data);
-  } catch (error) {
-    console.error('Xtream API Error:', error.message);
-    res.status(500).send('Failed to communicate with Xtream server');
-  }
-});
-
-app.get('/', (req, res) => {
-  res.send('IPTV Proxy Server is operational on Vercel');
-});
-
-module.exports = app;
+  if (action === 'live' && stream_id
