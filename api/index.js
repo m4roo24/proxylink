@@ -1,138 +1,92 @@
-const express = require('express');
-const { URL } = require('url');
+export const config = {
+  runtime: 'edge', // Uses Edge Runtime for fast, limitless video streaming
+};
 
-const app = express();
+export default async function handler(request) {
+  const url = new URL(request.url);
+  const targetUrl = url.searchParams.get('url');
 
-// Enable CORS for all requests
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Headers', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(200);
+  // 1. CORS Headers to allow playback on your website
+  const corsHeaders = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+  };
+
+  // Handle Preflight OPTIONS request
+  if (request.method === "OPTIONS") {
+    return new Response(null, { headers: corsHeaders });
   }
-  next();
-});
 
-/**
- * Universal Proxy Route using Native Fetch (.m3u8 & .ts segments)
- */
-app.get('/proxy', async (req, res) => {
-  const targetUrl = req.query.url;
+  // Validate URL
   if (!targetUrl) {
-    return res.status(400).send('Missing target URL parameter (?url=...)');
+    return new Response("Error: Provide a valid URL via ?url=", { status: 400, headers: corsHeaders });
   }
 
   try {
-    const parsedUrl = new URL(targetUrl);
-    const targetOrigin = `${parsedUrl.protocol}//${parsedUrl.host}`;
-    
-    // Upstream headers to bypass anti-hotlinking protection
-    const upstreamHeaders = {
-      'User-Agent': req.headers['user-agent'] || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Referer': targetOrigin + '/',
-      'Origin': targetOrigin
-    };
+    // Fetch the target stream (HTTP or HTTPS)
+    const targetResponse = await fetch(targetUrl, {
+      headers: {
+        "User-Agent": request.headers.get("User-Agent") || "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+      }
+    });
 
-    const isM3U8 = targetUrl.includes('.m3u8') || req.query.type === 'm3u8';
+    const contentType = targetResponse.headers.get("content-type") || "";
+    const isM3U8 = targetUrl.includes(".m3u8") || contentType.includes("mpegurl");
 
     if (isM3U8) {
-      // Fetch and rewrite M3U8 playlists
-      const response = await fetch(targetUrl, { headers: upstreamHeaders });
-      if (!response.ok) {
-        return res.status(response.status).send('Failed to fetch upstream M3U8 playlist');
+      // --------------------------------------------------------
+      // HANDLING .M3U8 PLAYLISTS
+      // --------------------------------------------------------
+      const text = await targetResponse.text();
+      let newM3u8 = "";
+      const lines = text.split('\n');
+      
+      // Build the base proxy URL to use your custom domain correctly
+      const proxyBase = `${url.origin}/?url=`;
+
+      for (let line of lines) {
+        line = line.trim();
+        if (!line) continue;
+
+        if (line.startsWith('#')) {
+          // Rewrite Encryption Keys
+          if (line.includes('URI=')) {
+            line = line.replace(/URI="([^"]+)"/, (match, uri) => {
+              const absoluteUri = new URL(uri, targetResponse.url).href;
+              return `URI="${proxyBase}${encodeURIComponent(absoluteUri)}"`;
+            });
+          }
+          newM3u8 += line + '\n';
+        } else {
+          // Rewrite standard .ts segments
+          const absoluteUri = new URL(line, targetResponse.url).href;
+          newM3u8 += proxyBase + encodeURIComponent(absoluteUri) + '\n';
+        }
       }
 
-      const playlist = await response.text();
-      const baseUrl = `${parsedUrl.protocol}//${parsedUrl.host}${parsedUrl.pathname.substring(0, parsedUrl.pathname.lastIndexOf('/') + 1)}`;
-
-      const lines = playlist.split('\n');
-      const currentHost = req.headers.host;
-      const protocol = req.headers['x-forwarded-proto'] || 'https';
-
-      const rewrittenLines = lines.map(line => {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith('#')) {
-          return line;
+      return new Response(newM3u8, {
+        status: targetResponse.status,
+        headers: {
+          ...corsHeaders,
+          "Content-Type": "application/vnd.apple.mpegurl"
         }
-
-        let absoluteSegmentUrl = trimmed;
-        if (!trimmed.startsWith('http://') && !trimmed.startsWith('https://')) {
-          absoluteSegmentUrl = new URL(trimmed, baseUrl).toString();
-        }
-
-        return `${protocol}://${currentHost}/proxy?url=${encodeURIComponent(absoluteSegmentUrl)}`;
       });
 
-      res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-      return res.send(rewrittenLines.join('\n'));
     } else {
-      // Fetch .ts segments using native fetch arrayBuffer to prevent 502/syntax errors
-      const response = await fetch(targetUrl, { headers: upstreamHeaders });
-      
-      if (!response.ok) {
-        return res.status(response.status).send(`Upstream segment error: ${response.status}`);
-      }
-
-      const arrayBuffer = await response.arrayBuffer();
-      const buffer = Buffer.from(arrayBuffer);
-
-      res.setHeader('Content-Type', 'video/mp2t');
-      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-      res.setHeader('Pragma', 'no-cache');
-      res.setHeader('Expires', '0');
-
-      return res.send(buffer);
+      // --------------------------------------------------------
+      // HANDLING .TS VIDEO SEGMENTS
+      // --------------------------------------------------------
+      // Streams the chunks directly to the user (saves RAM)
+      return new Response(targetResponse.body, {
+        status: targetResponse.status,
+        headers: {
+          ...corsHeaders,
+          "Content-Type": contentType || "video/mp2t"
+        }
+      });
     }
-  } catch (error) {
-    console.error('Proxy Error:', error.message);
-    if (!res.headersSent) {
-      res.status(500).send(`Proxy Error: ${error.message}`);
-    }
+  } catch (e) {
+    return new Response(`Proxy Error: ${e.message}`, { status: 500, headers: corsHeaders });
   }
-});
-
-/**
- * Xtream Codes API & Stream Handler
- */
-app.get('/xtream', async (req, res) => {
-  const { host, username, password, action, stream_id, type } = req.query;
-  
-  if (!host || !username || !password) {
-    return res.status(400).send('Missing Xtream parameters');
-  }
-
-  const cleanHost = host.endsWith('/') ? host.slice(0, -1) : host;
-  const currentHost = req.headers.host;
-  const protocol = req.headers['x-forwarded-proto'] || 'https';
-
-  if (action === 'live' && stream_id) {
-    const streamUrl = `${cleanHost}/live/${username}/${password}/${stream_id}.ts`;
-    return res.redirect(`${protocol}://${currentHost}/proxy?url=${encodeURIComponent(streamUrl)}`);
-  } 
-  
-  if ((action === 'movie' || action === 'series') && stream_id) {
-    const ext = req.query.ext || 'mp4';
-    const streamUrl = `${cleanHost}/${action}/${username}/${password}/${stream_id}.${ext}`;
-    return res.redirect(`${protocol}://${currentHost}/proxy?url=${encodeURIComponent(streamUrl)}`);
-  } 
-
-  try {
-    let apiUrl = `${cleanHost}/player_api.php?username=${username}&password=${password}`;
-    if (action) apiUrl += `&action=${action}`;
-    if (type) apiUrl += `&type=${type}`;
-
-    const apiResponse = await fetch(apiUrl);
-    const data = await apiResponse.json();
-    res.json(data);
-  } catch (error) {
-    console.error('Xtream API Error:', error.message);
-    res.status(500).send('Failed to communicate with Xtream server');
-  }
-});
-
-app.get('/', (req, res) => {
-  res.send('IPTV Proxy Server is operational');
-});
-
-module.exports = app;
+}
