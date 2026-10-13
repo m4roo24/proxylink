@@ -1,15 +1,13 @@
 {
   "name": "iptv-proxy",
   "version": "1.0.0",
-  "description": "A robust Node.js proxy supporting HTTP/HTTPS, .m3u8 playlists, .ts segments, and Xtream Codes API links.",
-  "main": "server.js",
+  "description": "Universal IPTV Proxy for .m3u8, .ts, and Xtream links on Vercel",
+  "main": "api/index.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js"
+    "start": "node api/index.js"
   },
   "dependencies": {
     "axios": "^1.6.8",
-    "dotenv": "^16.4.5",
     "express": "^4.19.2"
   }
 }
