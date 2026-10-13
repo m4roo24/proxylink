@@ -1,109 +1,137 @@
-const express = require('express');
-const axios = require('axios');
-const cors = require('cors');
+export const config = {
+  runtime: 'edge',
+};
 
-const app = express();
+export default async function handler(req) {
+  const url = new URL(req.url);
+  const targetUrl = url.searchParams.get('url');
 
-// Enable CORS so video players don't block the stream
-app.use(cors());
+  const corsHeaders = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+    'Access-Control-Allow-Headers': '*',
+  };
 
-// ---------------------------------------------------------
-// 1. HOME PAGE ROUTE (https://proxy.kurdsport.online/)
-// ---------------------------------------------------------
-app.get('/', (req, res) => {
-    res.send(`
-        <div style="font-family: sans-serif; text-align: center; margin-top: 50px;">
-            <h1 style="color: #0070f3;">✅ Proxy is Live!</h1>
-            <p>Your subdomain <b>proxy.kurdsport.online</b> is working correctly.</p>
-            <p>To use the proxy, format your URLs like this:</p>
-            <code style="background: #eee; padding: 10px; border-radius: 5px;">
-                https://proxy.kurdsport.online/proxy?url=YOUR_M3U8_LINK_HERE
-            </code>
-        </div>
-    `);
-});
+  if (req.method === 'OPTIONS') {
+    return new Response(null, { headers: corsHeaders });
+  }
 
-// ---------------------------------------------------------
-// 2. PROXY ROUTE (https://proxy.kurdsport.online/proxy)
-// ---------------------------------------------------------
-app.get('/proxy', async (req, res) => {
-    const targetUrl = req.query.url;
-
-    if (!targetUrl) {
-        return res.status(400).send('Error: Missing "url" query parameter.');
-    }
-
-    try {
-        const isM3u8 = targetUrl.includes('.m3u8');
-
-        // Fetch the target URL (supports both HTTP and HTTPS)
-        const response = await axios({
-            method: 'GET',
-            url: targetUrl,
-            responseType: isM3u8 ? 'text' : 'stream',
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
-                'Accept': '*/*'
-            }
-        });
-
-        // Forward the exact Content-Type to the video player
-        const contentType = response.headers['content-type'];
-        if (contentType) res.setHeader('Content-Type', contentType);
-
-        if (isM3u8) {
-            let m3u8Content = response.data;
+  // ==========================================
+  // 1. IF NO URL, SHOW THE HTML VIDEO PLAYER
+  // ==========================================
+  if (!targetUrl) {
+    const html = `
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>KurdSport Proxy Player</title>
+        <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+        <style>
+            body { font-family: system-ui, sans-serif; background: #0f172a; color: white; text-align: center; padding: 20px; }
+            h1 { color: #38bdf8; }
+            .container { max-width: 800px; margin: 0 auto; }
+            input { width: 70%; padding: 12px; border: none; border-radius: 6px; font-size: 16px; color: #333; margin-bottom: 10px; }
+            button { padding: 12px 24px; background: #38bdf8; color: #0f172a; border: none; border-radius: 6px; cursor: pointer; font-size: 16px; font-weight: bold; }
+            button:hover { background: #0ea5e9; }
+            video { width: 100%; margin-top: 30px; background: #000; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
+            .footer { margin-top: 40px; font-size: 14px; color: #94a3b8; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>KurdSport Proxy Player</h1>
+            <p>Paste an HTTP or HTTPS .m3u8 link below to test it securely</p>
+            <input type="text" id="streamUrl" placeholder="http://example.com/live/stream.m3u8">
+            <button onclick="playStream()">Play Stream</button>
             
-            // Get your domain dynamically (proxy.kurdsport.online)
-            const host = req.headers['x-forwarded-host'] || req.get('host');
-            const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'https';
-            const proxyHost = `${protocol}://${host}/proxy?url=`;
+            <video id="video" controls></video>
+            
+            <div class="footer">proxy.kurdsport.online</div>
+        </div>
 
-            // Function to rewrite URLs to point to your proxy
-            const rewriteUrl = (originalUrl) => {
-                try {
-                    const absoluteUrl = new URL(originalUrl, targetUrl).href;
-                    return proxyHost + encodeURIComponent(absoluteUrl);
-                } catch (e) {
-                    return originalUrl;
+        <script>
+            function playStream() {
+                const target = document.getElementById('streamUrl').value;
+                if (!target) return alert("Please enter an .m3u8 URL");
+                
+                // Route the video through your proxy
+                const proxyUrl = window.location.origin + '/?url=' + encodeURIComponent(target);
+                const video = document.getElementById('video');
+
+                if (Hls.isSupported()) {
+                    const hls = new Hls();
+                    hls.loadSource(proxyUrl);
+                    hls.attachMedia(video);
+                    hls.on(Hls.Events.MANIFEST_PARSED, () => video.play());
+                } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                    video.src = proxyUrl;
+                    video.addEventListener('loadedmetadata', () => video.play());
                 }
-            };
-
-            // Parse and rewrite standard lines (.ts chunks and .m3u8 qualities)
-            m3u8Content = m3u8Content.split('\n').map(line => {
-                const trimmed = line.trim();
-                if (trimmed && !trimmed.startsWith('#')) {
-                    return rewriteUrl(trimmed);
-                }
-                return line;
-            }).join('\n');
-
-            // Parse and rewrite Encryption Keys (if the stream is AES encrypted)
-            m3u8Content = m3u8Content.replace(/URI="([^"]+)"/g, (match, p1) => {
-                return `URI="${rewriteUrl(p1)}"`;
-            });
-
-            res.status(200).send(m3u8Content);
-        } else {
-            // For .ts video segments, stream the binary data directly for maximum speed
-            response.data.pipe(res);
-        }
-    } catch (error) {
-        console.error(`Error fetching: ${targetUrl}`, error.message);
-        res.status(500).send('Error loading the stream. The source might be down or blocking requests.');
-    }
-});
-
-// ---------------------------------------------------------
-// 3. EXPORT OR START SERVER
-// ---------------------------------------------------------
-// If we are running this locally, start the Express server
-if (process.env.NODE_ENV !== 'production') {
-    const PORT = process.env.PORT || 3000;
-    app.listen(PORT, () => {
-        console.log(`💻 Local server running on http://localhost:${PORT}`);
+            }
+        </script>
+    </body>
+    </html>
+    `;
+    return new Response(html, {
+      headers: { 'Content-Type': 'text/html' }
     });
-}
+  }
 
-// Export the app so Vercel can run it serverlessly
-module.exports = app;
+  // ==========================================
+  // 2. PROXY LOGIC (For .m3u8 and .ts files)
+  // ==========================================
+  try {
+    const decodedUrl = decodeURIComponent(targetUrl);
+    const reqHeaders = new Headers(req.headers);
+    const fetchHeaders = new Headers();
+    
+    // Forward standard headers to trick the source server
+    ['user-agent', 'referer', 'origin', 'accept-language'].forEach(h => {
+      if (reqHeaders.has(h)) fetchHeaders.set(h, reqHeaders.get(h));
+    });
+
+    const response = await fetch(decodedUrl, { headers: fetchHeaders });
+
+    if (!response.ok) {
+      return new Response(`Error: ${response.status}`, { status: response.status, headers: corsHeaders });
+    }
+
+    const contentType = response.headers.get('content-type') || '';
+    const isM3u8 = decodedUrl.includes('.m3u8') || contentType.includes('mpegurl');
+
+    let body = response.body;
+
+    if (isM3u8) {
+      const text = await response.text();
+      const baseUrl = new URL(decodedUrl);
+      
+      const proxiedText = text.split('\n').map(line => {
+        const trimmed = line.trim();
+        // Rewrite URI attributes (encryption keys)
+        if (trimmed.includes('URI="')) {
+          return trimmed.replace(/URI="([^"]+)"/g, (match, p1) => {
+            try { return `URI="${url.origin}/?url=${encodeURIComponent(new URL(p1, baseUrl.href).href)}"`; }
+            catch(e) { return match; }
+          });
+        }
+        if (trimmed.startsWith('#') || trimmed === '') return line;
+        // Rewrite .ts and .m3u8 paths
+        try { return `${url.origin}/?url=${encodeURIComponent(new URL(trimmed, baseUrl.href).href)}`; }
+        catch (e) { return line; }
+      }).join('\n');
+      
+      body = proxiedText;
+    }
+
+    const responseHeaders = new Headers(corsHeaders);
+    if (contentType) responseHeaders.set('Content-Type', contentType);
+    if (decodedUrl.includes('.ts')) responseHeaders.set('Cache-Control', 'public, max-age=31536000'); // Cache video pieces
+
+    return new Response(body, { status: response.status, headers: responseHeaders });
+
+  } catch (error) {
+    return new Response('Proxy Error: ' + error.message, { status: 500, headers: corsHeaders });
+  }
+          }
