@@ -4,7 +4,7 @@ const { URL } = require('url');
 
 const app = express();
 
-// Enable CORS for all requests so players (VLC, web players) can connect freely
+// Enable CORS for all requests
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Headers', '*');
@@ -16,7 +16,7 @@ app.use((req, res, next) => {
 });
 
 /**
- * Universal Proxy Route: Handles .m3u8, .ts, HTTP/HTTPS, and tokenized/extensionless streams
+ * Universal Proxy Route with Proper Referer/Origin Spoofing for .ts and .m3u8
  */
 app.get('/proxy', async (req, res) => {
   const targetUrl = req.query.url;
@@ -26,15 +26,24 @@ app.get('/proxy', async (req, res) => {
 
   try {
     const parsedUrl = new URL(targetUrl);
+    const targetOrigin = `${parsedUrl.protocol}//${parsedUrl.host}`;
+    
+    // Custom headers to bypass anti-hotlinking on upstream servers
+    const upstreamHeaders = {
+      'User-Agent': req.headers['user-agent'] || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Referer': targetOrigin + '/',
+      'Origin': targetOrigin
+    };
+
     const isExplicitM3U8 = targetUrl.includes('.m3u8') || req.query.type === 'm3u8';
 
     if (isExplicitM3U8) {
-      return await handleM3U8(targetUrl, parsedUrl, req, res);
+      return await handleM3U8(targetUrl, parsedUrl, upstreamHeaders, req, res);
     }
 
-    // Inspect headers for extensionless or custom token links (e.g., /live/play/.../id)
+    // Check content type for extensionless token streams
     const headResponse = await axios.head(targetUrl, {
-      headers: { 'User-Agent': req.headers['user-agent'] || 'VLC/3.0.16 LibVLC/3.0.16' },
+      headers: upstreamHeaders,
       validateStatus: () => true
     });
 
@@ -42,16 +51,14 @@ app.get('/proxy', async (req, res) => {
     const isPlaylistContent = contentType.includes('mpegurl') || contentType.includes('application/vnd.apple.mpegurl');
 
     if (isPlaylistContent) {
-      return await handleM3U8(targetUrl, parsedUrl, req, res);
+      return await handleM3U8(targetUrl, parsedUrl, upstreamHeaders, req, res);
     } else {
-      // Stream binary data (.ts segments, video files, etc.) directly using streams
+      // Stream binary data (.ts segments, etc.) with correct upstream headers
       const response = await axios({
         method: 'get',
         url: targetUrl,
         responseType: 'stream',
-        headers: { 
-          'User-Agent': req.headers['user-agent'] || 'VLC/3.0.16 LibVLC/3.0.16' 
-        }
+        headers: upstreamHeaders
       });
 
       res.writeHead(response.status, {
@@ -71,15 +78,10 @@ app.get('/proxy', async (req, res) => {
   }
 });
 
-/**
- * Helper function to fetch, parse, and rewrite M3U8 playlists and their segment links
- */
-async function handleM3U8(targetUrl, parsedUrl, req, res) {
+async function handleM3U8(targetUrl, parsedUrl, upstreamHeaders, req, res) {
   const response = await axios.get(targetUrl, {
     responseType: 'text',
-    headers: { 
-      'User-Agent': req.headers['user-agent'] || 'VLC/3.0.16 LibVLC/3.0.16' 
-    }
+    headers: upstreamHeaders
   });
 
   const playlist = response.data;
@@ -92,7 +94,7 @@ async function handleM3U8(targetUrl, parsedUrl, req, res) {
   const rewrittenLines = lines.map(line => {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith('#')) {
-      return line; // Keep comments and tags intact
+      return line;
     }
 
     let absoluteSegmentUrl = trimmed;
@@ -100,7 +102,6 @@ async function handleM3U8(targetUrl, parsedUrl, req, res) {
       absoluteSegmentUrl = new URL(trimmed, baseUrl).toString();
     }
 
-    // Route every segment (.ts or other chunks) back through the proxy
     return `${protocol}://${currentHost}/proxy?url=${encodeURIComponent(absoluteSegmentUrl)}`;
   });
 
@@ -146,7 +147,6 @@ app.get('/xtream', async (req, res) => {
   }
 });
 
-// Root check endpoint
 app.get('/', (req, res) => {
   res.send('IPTV Proxy Server is operational on proxy.kurdsport.online');
 });
